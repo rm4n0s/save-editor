@@ -1,0 +1,3 @@
+# Ren'Py keys of the tests
+signing-key MHcCAQEEIM0cgVXEKpBHwH3j7tcuUwUHmBwj4hy/AZVHHjTAXlXroAoGCCqGSM49AwEHoUQDQgAEn+JB/xTpakbHGNvDrW886YVhTt9li1ufgqYjg/V5KL5pJggUwO5Kzyo/XSpkulhI+2bbn7CxtzlahGSFjXWDJg== MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEn+JB/xTpakbHGNvDrW886YVhTt9li1ufgqYjg/V5KL5pJggUwO5Kzyo/XSpkulhI+2bbn7CxtzlahGSFjXWDJg==
+verifying-key MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEAm8tW+R+/mGpzrAvYDZnHlhFpmS/nECBBTcnW82dY8VvfuTL3PUYp7v44FgqqXWcER8T8+GVb0Ea48SlNRSTg==
