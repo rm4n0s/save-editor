@@ -11,6 +11,7 @@ import (
 	"github.com/rm4n0s/glutter/foundation"
 	"github.com/rm4n0s/glutter/gluttertest"
 	m "github.com/rm4n0s/glutter/material"
+	"github.com/rm4n0s/save-editor/internal/model"
 	"github.com/rm4n0s/save-editor/internal/renpysave"
 )
 
@@ -47,13 +48,19 @@ func copySave(t *testing.T, name string) string {
 // and waits until both are read.
 func newTester(t *testing.T, path, keysPath string) (*gluttertest.Tester, *gluttertest.FakeDesktop) {
 	t.Helper()
+	return newTesterWith(t, path, keysPath, supportedFormats())
+}
+
+// newTesterWith is newTester with the formats the app opens.
+func newTesterWith(t *testing.T, path, keysPath string, formats []model.Format) (*gluttertest.Tester, *gluttertest.FakeDesktop) {
+	t.Helper()
 	useLinux(t)
 	ts := gluttertest.New(t, gluttertest.Opts{Size: m.Size{Width: 1120, Height: 740}})
 	fd := ts.FakeDesktop()
-	ts.PumpWidget(NewEditorApp(path, keysPath))
+	ts.PumpWidget(newEditorApp(path, keysPath, formats))
 	waitFor(t, ts, "the save and the keys", func() bool {
 		s := state(ts)
-		return (path == "" || s.save != nil) && (keysPath == "" || s.keys != nil)
+		return (path == "" || s.doc != nil) && (keysPath == "" || s.keys != nil)
 	})
 	return ts, fd
 }
@@ -81,7 +88,7 @@ func fieldOf(id string) gluttertest.Finder {
 	return gluttertest.Descendant(gluttertest.ByKey(m.NewValueKey(id)), gluttertest.ByType[*m.TextField]())
 }
 
-func reopen(t *testing.T, path string) *renpysave.Save {
+func reopen(t *testing.T, path string) *renpysave.Document {
 	t.Helper()
 	s, err := renpysave.Open(context.Background(), path)
 	if err != nil {
@@ -90,7 +97,7 @@ func reopen(t *testing.T, path string) *renpysave.Save {
 	return s
 }
 
-func valueOf(t *testing.T, s *renpysave.Save, name string) string {
+func valueOf(t *testing.T, s *renpysave.Document, name string) string {
 	t.Helper()
 	for _, v := range s.Variables() {
 		if v.Name == name {
@@ -114,7 +121,7 @@ func TestShowsTheSave(t *testing.T) {
 	if ts.Exists(gluttertest.ByText("_internal")) {
 		t.Error("an internal variable is shown without the filter chip")
 	}
-	ts.Tap(gluttertest.ByText("Ren'Py internals"))
+	ts.Tap(gluttertest.ByText("Internals"))
 	ts.Pump()
 	if !ts.Exists(gluttertest.ByText("_internal")) {
 		t.Error("the filter chip does not show the internal variables")
@@ -185,7 +192,7 @@ func TestEditAndSave(t *testing.T) {
 
 			saved := reopen(t, path)
 			for _, want := range []struct{ name, repr string }{
-				{"money", "123456789"}, {"ratio", "2.25"}, {"player_name", `"Bob"`}, {"nickname", `"AnnAnn"`}, {"has_key", "False"},
+				{"money", "123456789"}, {"ratio", "2.25"}, {"player_name", `"Bob"`}, {"nickname", `"AnnAnn"`}, {"has_key", "false"},
 			} {
 				if got := valueOf(t, saved, want.name); got != want.repr {
 					t.Errorf("%s = %s, want %s", want.name, got, want.repr)
@@ -237,12 +244,12 @@ func TestUndoAndDiscard(t *testing.T) {
 	ts.Pump()
 	ts.Tap(gluttertest.Descendant(gluttertest.ByKey(m.NewValueKey("money")), gluttertest.ByTooltip("Undo this change")))
 	ts.Pump()
-	if s := state(ts); len(s.edits) != 1 || s.fields[s.vars[indexOf(t, s, "money")].Slot.Site.Start].Text() != "150" {
+	if s := state(ts); len(s.edits) != 1 || s.fields[s.vars[indexOf(t, s, "money")].Slot.Site.ID].Text() != "150" {
 		t.Errorf("undo left %d edits", len(s.edits))
 	}
 	ts.Tap(gluttertest.ByText("Discard"))
 	ts.Pump()
-	if s := state(ts); len(s.edits) != 0 || s.fields[s.vars[indexOf(t, s, "neg")].Slot.Site.Start].Text() != "-129" {
+	if s := state(ts); len(s.edits) != 0 || s.fields[s.vars[indexOf(t, s, "neg")].Slot.Site.ID].Text() != "-129" {
 		t.Errorf("discard left %d edits", len(s.edits))
 	}
 	ts.EnterText(fieldOf("money"), "150")
@@ -294,13 +301,13 @@ func TestSaveAsAndRename(t *testing.T) {
 
 func TestOpenWithTheDialog(t *testing.T) {
 	ts, fd := newTester(t, "", "")
-	if !ts.Exists(gluttertest.ByText("Open a Ren'Py save")) {
+	if !ts.Exists(gluttertest.ByText("Open a save file")) {
 		t.Fatal("the empty page is not shown")
 	}
 	ts.Tap(gluttertest.ByText("Open save…"))
 	fd.WaitFor("the file dialog", func() bool { return fd.PendingFileChoosers() == 1 })
 	fd.AnswerFileChooser(copySave(t, "friend.save"))
-	waitFor(t, ts, "the save", func() bool { return state(ts).save != nil })
+	waitFor(t, ts, "the save", func() bool { return state(ts).doc != nil })
 	if !ts.Exists(gluttertest.ByText("Signed on another computer")) {
 		t.Error("the signature of a friend's save is not shown")
 	}
@@ -314,7 +321,7 @@ func TestOpenFailureIsShown(t *testing.T) {
 	ts, _ := newTester(t, "", "")
 	state(ts).open(path)
 	waitFor(t, ts, "the error", func() bool { return state(ts).statusError })
-	if !ts.Exists(gluttertest.ByTextContaining("Cannot open broken.save")) {
+	if !ts.Exists(gluttertest.ByTextContaining("Cannot open broken.save: This file is not a save of a supported engine")) {
 		t.Errorf("status %q", state(ts).status)
 	}
 }

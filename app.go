@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +16,7 @@ import (
 	"github.com/rm4n0s/glutter/desktop"
 	m "github.com/rm4n0s/glutter/material"
 	"github.com/rm4n0s/glutter/services"
-	"github.com/rm4n0s/save-editor/internal/pickle"
+	"github.com/rm4n0s/save-editor/internal/model"
 	"github.com/rm4n0s/save-editor/internal/renpysave"
 )
 
@@ -25,23 +25,29 @@ type EditorApp struct {
 	m.StatelessWidget
 	path     string
 	keysPath string
+	formats  []model.Format
 }
 
 // NewEditorApp creates the app. path is a save to open at the start (none when empty), and
-// keysPath the security_keys.txt to sign with when it exists.
+// keysPath the Ren'Py security_keys.txt to sign Ren'Py saves with when it exists.
 func NewEditorApp(path, keysPath string) *EditorApp {
-	return &EditorApp{path: path, keysPath: keysPath}
+	return newEditorApp(path, keysPath, supportedFormats())
+}
+
+// newEditorApp is NewEditorApp with the formats it opens.
+func newEditorApp(path, keysPath string, formats []model.Format) *EditorApp {
+	return &EditorApp{path: path, keysPath: keysPath, formats: formats}
 }
 
 // Build builds the app.
 func (a *EditorApp) Build(m.BuildContext) m.Widget {
 	seed := m.Some(m.Colors.DeepPurple.Primary)
 	return m.NewMaterialApp(m.MaterialAppOpts{
-		Title:                      "Ren'Py Save Editor",
+		Title:                      "Save Editor",
 		Theme:                      m.NewThemeData(m.ThemeDataOpts{ColorSchemeSeed: seed}),
 		DarkTheme:                  m.NewThemeData(m.ThemeDataOpts{ColorSchemeSeed: seed, Brightness: m.BrightnessDark}),
 		DebugShowCheckedModeBanner: m.Some(false),
-		Home:                       NewEditorPage(a.path, a.keysPath),
+		Home:                       newEditorPage(a.path, a.keysPath, a.formats),
 	})
 }
 
@@ -51,11 +57,17 @@ type EditorPage struct {
 	m.StatefulWidget
 	path     string
 	keysPath string
+	formats  []model.Format
 }
 
 // NewEditorPage creates the page; see NewEditorApp for the paths.
 func NewEditorPage(path, keysPath string, opts ...m.WidgetOpts) *EditorPage {
-	return &EditorPage{StatefulWidget: m.NewStatefulWidgetBase(opts...), path: path, keysPath: keysPath}
+	return newEditorPage(path, keysPath, supportedFormats(), opts...)
+}
+
+// newEditorPage is NewEditorPage with the formats it opens.
+func newEditorPage(path, keysPath string, formats []model.Format, opts ...m.WidgetOpts) *EditorPage {
+	return &EditorPage{StatefulWidget: m.NewStatefulWidgetBase(opts...), path: path, keysPath: keysPath, formats: formats}
 }
 
 // CreateState creates the state.
@@ -64,20 +76,25 @@ func (p *EditorPage) CreateState() m.State { return &editorState{} }
 // edit is a new value typed or switched for a slot. value is nil while the text is not a
 // value of the slot's type, and err says why.
 type edit struct {
-	slot  pickle.Slot
+	slot  model.Slot
 	text  string
-	value *pickle.Value
+	value *model.Value
 	err   string
 }
 
 type editorState struct {
 	m.StateOf[*EditorPage]
 
-	path string
-	save *renpysave.Save
-	vars []renpysave.Variable
+	path   string
+	doc    model.Document
+	format model.Format
+	vars   []model.Variable
+	// renpy is doc when it is a Ren'Py save, which has a name and signatures that other
+	// formats do not; nil otherwise.
+	renpy        *renpysave.Document
+	hasInternals bool
 
-	// edits are by the start of the slot's site, so a slot shown twice has one edit.
+	// edits are by the ID of the slot's site, so a slot shown twice has one edit.
 	edits       map[int]*edit
 	fields      map[int]*m.TextEditingController
 	expanded    map[string]bool
@@ -98,7 +115,7 @@ func (s *editorState) InitState() {
 	s.expanded = map[string]bool{}
 	s.filter = m.NewTextEditingController()
 	s.saveName = m.NewTextEditingController()
-	s.status = "Open a Ren'Py save to edit it."
+	s.status = "Open a save file to edit it."
 	if path := s.Widget().keysPath; path != "" {
 		s.loadKeys(path)
 	}
@@ -139,7 +156,7 @@ func (s *editorState) changes() (int, bool) {
 		}
 		n++
 	}
-	if s.save != nil && s.saveName.Text() != s.save.SaveName() {
+	if s.renpy != nil && s.saveName.Text() != s.renpy.SaveName() {
 		n++
 	}
 	return n, valid
@@ -156,23 +173,31 @@ func (s *editorState) openIn(ctx context.Context, path string) {
 		path = abs
 	}
 	s.SetState(func() { s.busy = true })
-	save, err := renpysave.Open(ctx, path)
+	doc, format, err := openDocument(ctx, s.Widget().formats, path)
 	if err != nil {
 		s.fail("Cannot open "+filepath.Base(path), err)
 		return
 	}
 	s.SetState(func() {
-		s.show(path, save)
+		s.show(path, doc, format)
 		s.status, s.statusError = fmt.Sprintf("Opened %s: %d variables.", filepath.Base(path), len(s.vars)), false
 	})
 }
 
 // show replaces the save on the page. Call it inside SetState.
-func (s *editorState) show(path string, save *renpysave.Save) {
-	s.path, s.save, s.vars, s.busy = path, save, save.Variables(), false
+func (s *editorState) show(path string, doc model.Document, format model.Format) {
+	s.path, s.doc, s.format, s.vars, s.busy = path, doc, format, doc.Variables(), false
+	s.renpy, _ = doc.(*renpysave.Document)
+	s.hasInternals = false
+	for _, v := range s.vars {
+		s.hasInternals = s.hasInternals || v.Internal
+	}
+	s.showHidden = s.showHidden && s.hasInternals
 	s.edits = map[int]*edit{}
 	s.expanded = map[string]bool{}
-	s.saveName.SetText(save.SaveName())
+	if s.renpy != nil {
+		s.saveName.SetText(s.renpy.SaveName())
+	}
 	// The fields of the old save are still in the tree until this frame is built.
 	old := s.fields
 	s.fields = map[int]*m.TextEditingController{}
@@ -191,8 +216,8 @@ func (s *editorState) chooseSave() {
 	}
 	s.Go(func(ctx context.Context) {
 		res, err := desktop.OpenFiles(ctx, bc, desktop.OpenFilesOpts{
-			Title:         "Open a Ren'Py save",
-			Filters:       []desktop.FileFilter{{Name: "Ren'Py saves", Patterns: []string{"*.save", "*.SAVE"}}, {Name: "All files", Patterns: []string{"*"}}},
+			Title:         "Open a save",
+			Filters:       openFilters(s.Widget().formats),
 			CurrentFolder: existingFolder(start),
 		})
 		switch {
@@ -246,44 +271,72 @@ func (s *editorState) chooseKeys() {
 	})
 }
 
-// encodeOpts are the changes of the page, or false with the status saying why there are
-// none to save.
-func (s *editorState) encodeOpts() (renpysave.EncodeOpts, bool) {
-	if s.save == nil {
-		return renpysave.EncodeOpts{}, false
+// changeSet is the changes of the page, to give to Encode.
+type changeSet struct {
+	edits []model.Edit
+	// saveName and keys are Ren'Py's: the new name of the save, and the key that signs it.
+	saveName *string
+	keys     *renpysave.KeyRing
+}
+
+// pending is the changes of the page, or false with the status saying why there are none to
+// save.
+func (s *editorState) pending() (changeSet, bool) {
+	if s.doc == nil {
+		return changeSet{}, false
 	}
 	if _, valid := s.changes(); !valid {
 		s.setStatus("Fix the values marked in red before saving.", true)
-		return renpysave.EncodeOpts{}, false
+		return changeSet{}, false
 	}
-	var opts renpysave.EncodeOpts
+	var cs changeSet
 	for _, e := range s.edits {
-		opts.Edits = append(opts.Edits, pickle.Edit{Site: e.slot.Site, Value: e.value})
+		cs.edits = append(cs.edits, model.Edit{Site: e.slot.Site, Value: e.value})
 	}
-	if name := s.saveName.Text(); name != s.save.SaveName() {
-		opts.SaveName = &name
+	slices.SortFunc(cs.edits, func(a, b model.Edit) int { return a.Site.ID - b.Site.ID })
+	if s.renpy != nil {
+		if name := s.saveName.Text(); name != s.renpy.SaveName() {
+			cs.saveName = &name
+		}
+		if s.sign && s.keys != nil {
+			cs.keys = s.keys
+		}
 	}
-	if s.sign && s.keys != nil {
-		opts.Keys = s.keys
+	return cs, true
+}
+
+// encode is the file with the changes.
+func (s *editorState) encode(doc model.Document, cs changeSet) ([]byte, error) {
+	if rd, ok := doc.(*renpysave.Document); ok {
+		return rd.EncodeWith(renpysave.EncodeOpts{Edits: cs.edits, SaveName: cs.saveName, Keys: cs.keys})
 	}
-	return opts, true
+	return doc.Encode(cs.edits)
+}
+
+// partsWord is "part" for one part of an object and "parts" for any other number, the wording
+// of model.Value.Repr.
+func partsWord(n int) string {
+	if n == 1 {
+		return "part"
+	}
+	return "parts"
 }
 
 // write saves the page to path (asking where first when saveAs is set) on a goroutine,
 // then shows the save as written.
 func (s *editorState) write(saveAs bool) {
-	opts, ok := s.encodeOpts()
+	cs, ok := s.pending()
 	if !ok {
 		return
 	}
-	save, path, bc := s.save, s.path, s.Context()
+	doc, format, path, bc := s.doc, s.format, s.path, s.Context()
 	s.SetState(func() { s.busy = true })
 	s.Go(func(ctx context.Context) {
 		backup := true
 		if saveAs {
 			res, err := desktop.SaveFile(ctx, bc, desktop.SaveFileOpts{
-				Title:         "Save the Ren'Py save as",
-				Filters:       []desktop.FileFilter{{Name: "Ren'Py saves", Patterns: []string{"*.save"}}},
+				Title:         "Save as",
+				Filters:       saveFilters(format),
 				CurrentFolder: filepath.Dir(path),
 				CurrentName:   filepath.Base(path),
 			})
@@ -297,25 +350,27 @@ func (s *editorState) write(saveAs bool) {
 			}
 			path, backup = res.Paths[0], false
 		}
-		data, err := save.Encode(opts)
+		data, err := s.encode(doc, cs)
 		if err != nil {
 			s.fail("Cannot save", err)
 			return
 		}
-		saved, err := renpysave.Parse(data)
+		saved, err := format.Parse(filepath.Base(path), data)
 		if err != nil {
 			s.fail("The new save does not read back; nothing was written", err)
 			return
 		}
-		if err := renpysave.WriteFile(ctx, path, data, backup); err != nil {
+		if err := model.WriteFile(ctx, path, data, backup); err != nil {
 			s.fail("Cannot write "+filepath.Base(path), err)
 			return
 		}
 		msg := "Saved " + filepath.Base(path)
+		before, _ := doc.(*renpysave.Document)
+		after, _ := saved.(*renpysave.Document)
 		switch {
-		case opts.Keys != nil:
+		case cs.keys != nil:
 			msg += ", signed with your key."
-		case saved.Signatures == "" && save.Signatures != "":
+		case before != nil && after != nil && after.Signatures == "" && before.Signatures != "":
 			msg += " without signatures: Ren'Py will ask once before loading it."
 		default:
 			msg += "."
@@ -324,46 +379,46 @@ func (s *editorState) write(saveAs bool) {
 			msg += " The first version is kept in " + filepath.Base(path) + ".bak."
 		}
 		s.SetState(func() {
-			s.show(path, saved)
+			s.show(path, saved, format)
 			s.status, s.statusError = msg, false
 		})
 	})
 }
 
 // setText records the text of a field as the new value of its slot.
-func (s *editorState) setText(slot pickle.Slot, text string) {
+func (s *editorState) setText(slot model.Slot, text string) {
 	s.SetState(func() {
-		v, err := parseValue(slot.Value.Kind, text)
+		v, err := parseValue(slot, text)
 		switch {
 		case err != nil:
 			msg := err.Error()
 			if appErr, ok := errors.FromError(err); ok {
 				msg = appErr.Message
 			}
-			s.edits[slot.Site.Start] = &edit{slot: slot, text: text, err: msg}
+			s.edits[slot.Site.ID] = &edit{slot: slot, text: text, err: msg}
 		case sameValue(v, slot.Value):
-			delete(s.edits, slot.Site.Start)
+			delete(s.edits, slot.Site.ID)
 		default:
-			s.edits[slot.Site.Start] = &edit{slot: slot, text: text, value: v}
+			s.edits[slot.Site.ID] = &edit{slot: slot, text: text, value: v}
 		}
 	})
 }
 
-func (s *editorState) setBool(slot pickle.Slot, b bool) {
+func (s *editorState) setBool(slot model.Slot, b bool) {
 	s.SetState(func() {
 		if b == slot.Value.Bool {
-			delete(s.edits, slot.Site.Start)
+			delete(s.edits, slot.Site.ID)
 			return
 		}
-		s.edits[slot.Site.Start] = &edit{slot: slot, value: &pickle.Value{Kind: pickle.KindBool, Bool: b}}
+		s.edits[slot.Site.ID] = &edit{slot: slot, value: &model.Value{Kind: model.KindBool, Type: slot.Value.Type, Bool: b}}
 	})
 }
 
 // reset gives the slot its value from the file again.
-func (s *editorState) reset(slot pickle.Slot) {
+func (s *editorState) reset(slot model.Slot) {
 	s.SetState(func() {
-		delete(s.edits, slot.Site.Start)
-		if c, ok := s.fields[slot.Site.Start]; ok {
+		delete(s.edits, slot.Site.ID)
+		if c, ok := s.fields[slot.Site.ID]; ok {
 			c.SetText(editText(slot.Value))
 		}
 	})
@@ -372,13 +427,13 @@ func (s *editorState) reset(slot pickle.Slot) {
 func (s *editorState) discard() {
 	s.SetState(func() {
 		for _, e := range s.edits {
-			if c, ok := s.fields[e.slot.Site.Start]; ok {
+			if c, ok := s.fields[e.slot.Site.ID]; ok {
 				c.SetText(editText(e.slot.Value))
 			}
 		}
 		s.edits = map[int]*edit{}
-		if s.save != nil {
-			s.saveName.SetText(s.save.SaveName())
+		if s.renpy != nil {
+			s.saveName.SetText(s.renpy.SaveName())
 		}
 		s.status, s.statusError = "Changes discarded.", false
 	})
@@ -389,21 +444,21 @@ func (s *editorState) toggle(id string) {
 }
 
 // field is the controller of the text field of a slot, made the first time it is shown.
-func (s *editorState) field(slot pickle.Slot) *m.TextEditingController {
-	c, ok := s.fields[slot.Site.Start]
+func (s *editorState) field(slot model.Slot) *m.TextEditingController {
+	c, ok := s.fields[slot.Site.ID]
 	if !ok {
 		text := editText(slot.Value)
-		if e, ok := s.edits[slot.Site.Start]; ok {
+		if e, ok := s.edits[slot.Site.ID]; ok {
 			text = e.text
 		}
 		c = m.NewTextEditingController(text)
-		s.fields[slot.Site.Start] = c
+		s.fields[slot.Site.ID] = c
 	}
 	return c
 }
 
 func (s *editorState) Build(bc m.BuildContext) m.Widget {
-	hasSave := s.save != nil
+	hasSave := s.doc != nil
 	var whenSaved func()
 	var whenSavedAs func()
 	if hasSave && !s.busy {
@@ -454,8 +509,8 @@ func (s *editorState) Build(bc m.BuildContext) m.Widget {
 }
 
 func (s *editorState) title() string {
-	if s.save == nil {
-		return "Ren'Py Save Editor"
+	if s.doc == nil {
+		return "Save Editor"
 	}
 	title := filepath.Base(s.path)
 	if n, _ := s.changes(); n > 0 {
@@ -466,18 +521,14 @@ func (s *editorState) title() string {
 
 func (s *editorState) buildEmpty(bc m.BuildContext) m.Widget {
 	theme := m.ThemeOf(bc)
-	folder := renpyFolder()
-	if folder == "" {
-		folder = "the Ren'Py folder of your home"
-	}
 	return m.NewCenter(m.NewConstrainedBox(m.NewBoxConstraints(m.BoxConstraintsOpts{MaxWidth: m.Some(520.0)}),
 		m.NewPadding(m.NewEdgeInsetsAll(24), m.NewColumn([]m.Widget{
 			m.NewIcon(m.Icons.FolderOpen(), m.IconOpts{Size: m.Some(64.0), Color: m.Some(theme.ColorScheme.Primary())}),
 			m.NewSizedBox(nil, m.SizedBoxOpts{Height: m.Some(16.0)}),
-			m.NewText("Open a Ren'Py save", m.TextOpts{Style: theme.TextTheme.HeadlineSmall}),
+			m.NewText("Open a save file", m.TextOpts{Style: theme.TextTheme.HeadlineSmall}),
 			m.NewSizedBox(nil, m.SizedBoxOpts{Height: m.Some(8.0)}),
-			m.NewText("Saves are the .save files in the game's game/saves folder, and in "+folder+
-				" under the name of the game. Close the game before you edit its saves.",
+			m.NewText("A save file is what a game writes to remember your progress. Close the game before you edit its saves. "+
+				"Saves of these games can be opened: "+formatNames(s.Widget().formats)+".",
 				m.TextOpts{TextAlign: m.TextAlignCenter, Style: theme.TextTheme.BodyMedium}),
 			m.NewSizedBox(nil, m.SizedBoxOpts{Height: m.Some(24.0)}),
 			m.NewFilledButtonIcon(s.chooseSave, m.NewText("Open save…"), m.FilledButtonIconOpts{Icon: m.NewIcon(m.Icons.FolderOpen())}),
@@ -499,20 +550,16 @@ func (s *editorState) buildStatus(bc m.BuildContext) m.Widget {
 		})
 }
 
-// buildDetails is the left side: the screenshot, the name, the details and the signature.
+// buildDetails is the left side: the screenshot, the details, and for a Ren'Py save its name and
+// signature.
 func (s *editorState) buildDetails(bc m.BuildContext) m.Widget {
 	theme := m.ThemeOf(bc)
 	small := theme.TextTheme.BodySmall.CopyWith(m.TextStyleCopy{Color: m.Some(theme.ColorScheme.OnSurfaceVariant())})
 	var shot m.Widget
-	if len(s.save.Screenshot) > 0 {
-		shot = m.NewClipRRect(m.NewImageMemory(s.save.Screenshot, m.ImageMemoryOpts{ImageOpts: m.ImageOpts{
+	if sh, ok := s.doc.(model.Screenshotter); ok && len(sh.Screenshot()) > 0 {
+		shot = m.NewClipRRect(m.NewImageMemory(sh.Screenshot(), m.ImageMemoryOpts{ImageOpts: m.ImageOpts{
 			Fit: m.BoxFitContain, SemanticLabel: m.Some("Screenshot of the save"),
 		}}), m.ClipRRectOpts{BorderRadius: m.NewBorderRadiusCircular(12)})
-	} else {
-		shot = m.NewContainer(m.NewCenter(m.NewIcon(m.Icons.Image(), m.IconOpts{Color: m.Some(theme.ColorScheme.OnSurfaceVariant())})),
-			m.ContainerOpts{Height: m.Some(120.0), Decoration: m.NewBoxDecoration(m.BoxDecorationOpts{
-				Color: m.Some(theme.ColorScheme.SurfaceContainerHighest()), BorderRadius: m.NewBorderRadiusCircular(12),
-			})})
 	}
 	info := []m.Widget{}
 	add := func(label, value, tooltip string) {
@@ -524,36 +571,41 @@ func (s *editorState) buildDetails(bc m.BuildContext) m.Widget {
 			text = m.NewTooltip(text, m.TooltipOpts{Message: tooltip})
 		}
 		info = append(info, m.NewPadding(m.NewEdgeInsetsSymmetric(3, 0), m.NewRow([]m.Widget{
-			m.NewSizedBox(m.NewText(label, m.TextOpts{Style: small}), m.SizedBoxOpts{Width: m.Some(96.0)}),
+			m.NewSizedBox(m.NewText(label, m.TextOpts{Style: small}), m.SizedBoxOpts{Width: m.Some(104.0)}),
 			m.NewExpanded(text),
 		}, m.RowOpts{CrossAxisAlignment: m.CrossAxisAlignmentStart})))
 	}
 	add("File", filepath.Base(s.path), s.path)
-	add("Saved", metadataTime(s.save.Metadata["_ctime"]), "")
-	add("Play time", metadataDuration(s.save.Metadata["_game_runtime"]), "")
-	add("Game version", metadataString(s.save.Metadata["_version"]), "")
-	add("Ren'Py", s.save.RenpyVersion, "")
-	add("Variables", strconv.Itoa(len(s.vars)), "")
+	add("Format", s.format.Name, "")
+	for _, d := range s.doc.Details() {
+		add(d.Label, d.Text, d.Tooltip)
+	}
 
-	return m.NewSingleChildScrollView(m.NewPadding(m.NewEdgeInsetsAll(16), m.NewColumn([]m.Widget{
-		shot,
-		m.NewSizedBox(nil, m.SizedBoxOpts{Height: m.Some(16.0)}),
-		m.NewTextField(m.TextFieldOpts{
+	var parts []m.Widget
+	if shot != nil {
+		parts = append(parts, shot, m.NewSizedBox(nil, m.SizedBoxOpts{Height: m.Some(16.0)}))
+	}
+	if s.renpy != nil {
+		parts = append(parts, m.NewTextField(m.TextFieldOpts{
 			Key:        m.NewValueKey("save name"),
 			Controller: s.saveName,
 			Decoration: &m.InputDecoration{LabelText: m.Some("Save name"), Border: m.NewOutlineInputBorder(), IsDense: m.Some(true)},
 			OnChanged:  func(string) { s.SetState(func() {}) },
-		}),
-		m.NewSizedBox(nil, m.SizedBoxOpts{Height: m.Some(12.0)}),
-		m.NewColumn(info),
-		m.NewSizedBox(nil, m.SizedBoxOpts{Height: m.Some(12.0)}),
-		s.buildSignature(bc),
-	}, m.ColumnOpts{CrossAxisAlignment: m.CrossAxisAlignmentStretch})))
+		}), m.NewSizedBox(nil, m.SizedBoxOpts{Height: m.Some(12.0)}))
+	}
+	parts = append(parts, m.NewColumn(info))
+	if s.renpy != nil {
+		parts = append(parts, m.NewSizedBox(nil, m.SizedBoxOpts{Height: m.Some(12.0)}), s.buildSignature(bc))
+	}
+	return m.NewSingleChildScrollView(m.NewPadding(m.NewEdgeInsetsAll(16), m.NewColumn(parts,
+		m.ColumnOpts{CrossAxisAlignment: m.CrossAxisAlignmentStretch})))
 }
 
+// buildSignature is the card of a Ren'Py save: whether the game trusts its signatures, and the
+// key to sign with.
 func (s *editorState) buildSignature(bc m.BuildContext) m.Widget {
 	theme := m.ThemeOf(bc)
-	status := s.save.SignatureStatus(s.keys)
+	status := s.renpy.SignatureStatus(s.keys)
 	icon, color := m.Icons.VerifiedUser(), theme.ColorScheme.Primary()
 	explain := "Ren'Py loads this save without asking."
 	switch status {
@@ -620,7 +672,7 @@ func (s *editorState) buildVariables(bc m.BuildContext) m.Widget {
 			s.SetState(func() { s.filter.Clear() })
 		}, m.NewIcon(m.Icons.Clear()), m.IconButtonOpts{Tooltip: "Clear the search"})
 	}
-	bar := m.NewPadding(m.NewEdgeInsetsFromLTRB(16, 12, 16, 8), m.NewRow([]m.Widget{
+	barItems := []m.Widget{
 		m.NewExpanded(m.NewTextField(m.TextFieldOpts{
 			Key:        m.NewValueKey("search"),
 			Controller: s.filter,
@@ -634,15 +686,17 @@ func (s *editorState) buildVariables(bc m.BuildContext) m.Widget {
 			OnChanged: func(string) { s.SetState(func() {}) },
 		})),
 		m.NewSizedBox(nil, m.SizedBoxOpts{Width: m.Some(12.0)}),
-		m.NewFilterChip(m.NewText("Ren'Py internals"), m.FilterChipOpts{
+	}
+	if s.hasInternals {
+		barItems = append(barItems, m.NewFilterChip(m.NewText("Internals"), m.FilterChipOpts{
 			Selected:   s.showHidden,
 			OnSelected: func(v bool) { s.SetState(func() { s.showHidden = v }) },
-			Tooltip:    m.Some("Show the variables whose names start with an underscore"),
-		}),
-		m.NewSizedBox(nil, m.SizedBoxOpts{Width: m.Some(12.0)}),
-		m.NewText(changes, m.TextOpts{Style: theme.TextTheme.LabelLarge}),
-		m.NewTextButton(onDiscard, m.NewText("Discard")),
-	}))
+			Tooltip:    m.Some("Show the variables that belong to the engine, not to the game"),
+		}), m.NewSizedBox(nil, m.SizedBoxOpts{Width: m.Some(12.0)}))
+	}
+	barItems = append(barItems, m.NewText(changes, m.TextOpts{Style: theme.TextTheme.LabelLarge}),
+		m.NewTextButton(onDiscard, m.NewText("Discard")))
+	bar := m.NewPadding(m.NewEdgeInsetsFromLTRB(16, 12, 16, 8), m.NewRow(barItems))
 	var list m.Widget
 	if len(rows) == 0 {
 		list = m.NewCenter(m.NewText("No variable matches.", m.TextOpts{Style: theme.TextTheme.BodyMedium}))
@@ -676,8 +730,12 @@ func (s *editorState) buildVariables(bc m.BuildContext) m.Widget {
 func (s *editorState) buildRow(bc m.BuildContext, r row) m.Widget {
 	theme := m.ThemeOf(bc)
 	scheme := theme.ColorScheme
-	e, changed := s.edits[r.slot.Site.Start]
-	editable := r.slot.Editable()
+	canEdit := editable(r.slot)
+	var e *edit
+	var changed bool
+	if canEdit {
+		e, changed = s.edits[r.slot.Site.ID]
+	}
 
 	var expander m.Widget = m.NewSizedBox(nil, m.SizedBoxOpts{Width: m.Some(40.0)})
 	if r.expandable {
@@ -700,37 +758,37 @@ func (s *editorState) buildRow(bc m.BuildContext, r row) m.Widget {
 	switch {
 	case r.recursive:
 		value = m.NewText("(contains itself)", m.TextOpts{Style: typeStyle})
-	case editable && r.slot.Value.Kind == pickle.KindBool:
+	case canEdit && r.slot.Value.Kind == model.KindBool:
 		on := r.slot.Value.Bool
 		if changed {
 			on = e.value.Bool
 		}
-		label := "False"
+		label := "false"
 		if on {
-			label = "True"
+			label = "true"
 		}
 		value = m.NewRow([]m.Widget{
 			m.NewSwitch(on, func(v bool) { s.setBool(r.slot, v) }),
 			m.NewSizedBox(nil, m.SizedBoxOpts{Width: m.Some(8.0)}),
 			m.NewText(label, m.TextOpts{Style: theme.TextTheme.BodyMedium}),
 		})
-	case editable && r.slot.Value.Kind != pickle.KindNone:
+	case canEdit:
 		dec := &m.InputDecoration{Border: m.NewOutlineInputBorder(), IsDense: m.Some(true)}
 		if changed && e.err != "" {
 			dec.ErrorText = m.Some(e.err)
 		}
 		value = m.NewTextField(m.TextFieldOpts{
-			Key:        m.NewValueKey(r.slot.Site.Start),
+			Key:        m.NewValueKey(r.slot.Site.ID),
 			Controller: s.field(r.slot),
 			Decoration: dec,
 			OnChanged:  func(text string) { s.setText(r.slot, text) },
 		})
 	default:
 		text := r.slot.Value.Repr()
-		if r.slot.Value.Kind == pickle.KindObject {
+		if r.slot.Value.Kind == model.KindObject {
 			text = r.slot.Value.QualifiedTypeName()
-			if n := len(r.slot.Value.Children()); n > 0 {
-				text += " (" + strconv.Itoa(n) + " parts)"
+			if n := len(r.slot.Value.Children); n > 0 {
+				text += " (" + strconv.Itoa(n) + " " + partsWord(n) + ")"
 			}
 		}
 		value = m.NewText(text, m.TextOpts{Style: theme.TextTheme.BodyMedium.CopyWith(m.TextStyleCopy{
@@ -776,36 +834,4 @@ func existingFolder(dir string) string {
 		return dir
 	}
 	return ""
-}
-
-func metadataNumber(v any) (float64, bool) {
-	n, ok := v.(json.Number)
-	if !ok {
-		return 0, false
-	}
-	f, err := n.Float64()
-	return f, err == nil
-}
-
-func metadataTime(v any) string {
-	f, ok := metadataNumber(v)
-	if !ok || f <= 0 {
-		return ""
-	}
-	sec, frac := math.Modf(f)
-	return time.Unix(int64(sec), int64(frac*1e9)).Local().Format("2006-01-02 15:04")
-}
-
-func metadataDuration(v any) string {
-	f, ok := metadataNumber(v)
-	if !ok || f < 0 {
-		return ""
-	}
-	total := int64(f)
-	return fmt.Sprintf("%d:%02d:%02d", total/3600, total/60%60, total%60)
-}
-
-func metadataString(v any) string {
-	s, _ := v.(string)
-	return s
 }

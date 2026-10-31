@@ -1,0 +1,49 @@
+{
+	"playerName" : {
+		"__type" : "string",
+		"value" : "Ünity Hero"
+	},
+	"level" : {
+		"__type" : "int",
+		"value" : 12
+	},
+	"gold" : {
+		"__type" : "long",
+		"value" : 5000000000
+	},
+	"health" : {
+		"__type" : "float",
+		"value" : 87.5
+	},
+	"speed" : {
+		"__type" : "double",
+		"value" : 3.75
+	},
+	"alive" : {
+		"__type" : "bool",
+		"value" : true
+	},
+	"rank" : {
+		"__type" : "byte",
+		"value" : 200
+	},
+	"position" : {
+		"__type" : "UnityEngine.Vector3,UnityEngine.CoreModule",
+		"value" : {
+			"x" : 1.5,
+			"y" : 0,
+			"z" : -2
+		}
+	},
+	"inventory" : {
+		"__type" : "System.Collections.Generic.List`1[[System.String,mscorlib]],mscorlib",
+		"value" : [
+			"sword",
+			"shield"
+		]
+	},
+	"nothing" : {
+		"__type" : "string",
+		"value" : null
+	}
+}
