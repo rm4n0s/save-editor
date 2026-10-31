@@ -1,6 +1,7 @@
-// Package renpysave reads and writes Ren'Py save files. A save is a zip file with the pickled
-// game state ("log"), a screenshot, the save's name and metadata, and from Ren'Py 7.6 and 8.1
-// on, signatures of the log made with the player's key.
+// Package renpysave reads and writes Ren'Py save files, and is the Ren'Py format of the
+// editor. A save is a zip file with the pickled game state ("log"), a screenshot, the save's
+// name and metadata, and from Ren'Py 7.6 and 8.1 on, signatures of the log made with the
+// player's key.
 package renpysave
 
 import (
@@ -10,11 +11,9 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"path/filepath"
-	"slices"
-	"strings"
 
 	"github.com/rm4n0s/errors"
+	"github.com/rm4n0s/save-editor/internal/model"
 	"github.com/rm4n0s/save-editor/internal/pickle"
 )
 
@@ -28,16 +27,17 @@ const (
 	entrySignatures   = "signatures"
 )
 
-// Save is a parsed save file.
-type Save struct {
+// Document is a parsed Ren'Py save file. It is a model.Document and a model.Screenshotter;
+// the save's name, the signatures and the key ring are Ren'Py's own and are its other
+// methods.
+type Document struct {
 	zip *zip.Reader
 
 	// Log is the pickle of the (roots, rollback log) tuple.
 	Log *pickle.Document
 	// Roots is the dict of the variables of the stores, by "store.name".
-	Roots *pickle.Value
-	// Screenshot is the PNG that the save and load screens show, or nil.
-	Screenshot []byte
+	Roots      *pickle.Value
+	screenshot []byte
 	// ExtraInfo is the save's name, the extra_info of renpy.save.
 	ExtraInfo string
 	// Metadata is the save's JSON: _save_name, _renpy_version, _version, _ctime,
@@ -47,23 +47,13 @@ type Save struct {
 	RenpyVersion string
 	// Signatures is the text of the signatures file, empty when there is none.
 	Signatures string
-}
 
-// Variable is one variable of a store.
-type Variable struct {
-	// Key is the key in the roots, such as "store.money" or "store.mystore.x".
-	Key string
-	// Name is the key without the "store." of the default store, such as "money" or
-	// "mystore.x".
-	Name string
-	// Internal is a variable of Ren'Py or of a library, whose name starts with an
-	// underscore.
-	Internal bool
-	Slot     pickle.Slot
+	vars  []model.Variable
+	sites map[*model.Site]siteInfo
 }
 
 // Open reads the save file at path.
-func Open(ctx context.Context, path string) (*Save, error) {
+func Open(ctx context.Context, path string) (*Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, errors.NewErr(tagSaveUnreadable, err).SetMetadata("path", path)
 	}
@@ -75,12 +65,12 @@ func Open(ctx context.Context, path string) (*Save, error) {
 }
 
 // Parse reads a save from the bytes of its file.
-func Parse(data []byte) (*Save, error) {
+func Parse(data []byte) (*Document, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, errors.NewErr(tagSaveNotZip, err)
 	}
-	s := &Save{zip: zr}
+	s := &Document{zip: zr}
 	var logData, metadata []byte
 	for _, f := range zr.File {
 		var target *[]byte
@@ -89,7 +79,7 @@ func Parse(data []byte) (*Save, error) {
 		case entryLog:
 			target = &logData
 		case entryScreenshot:
-			target = &s.Screenshot
+			target = &s.screenshot
 		case entryJSON:
 			target = &metadata
 		case entryExtraInfo:
@@ -134,6 +124,7 @@ func Parse(data []byte) (*Save, error) {
 	}
 	s.Log = doc
 	s.Roots = top.Items[0].Value
+	s.convert()
 	return s, nil
 }
 
@@ -150,46 +141,18 @@ func readEntry(f *zip.File) ([]byte, error) {
 	return b, nil
 }
 
-// Variables are the variables of the roots whose keys are strings, sorted by name.
-func (s *Save) Variables() []Variable {
-	var out []Variable
-	seen := map[string]int{}
-	for _, e := range s.Roots.Entries {
-		k := e.Key.Value
-		if k.Kind != pickle.KindString && k.Kind != pickle.KindByteString {
-			continue
-		}
-		name := strings.TrimPrefix(k.Str, "store.")
-		internal := false
-		for part := range strings.SplitSeq(name, ".") {
-			if strings.HasPrefix(part, "_") {
-				internal = true
-			}
-		}
-		v := Variable{Key: k.Str, Name: name, Internal: internal, Slot: e.Value}
-		if i, ok := seen[k.Str]; ok {
-			out[i] = v // the last value of a key is the one Python keeps
-			continue
-		}
-		seen[k.Str] = len(out)
-		out = append(out, v)
-	}
-	slices.SortStableFunc(out, func(a, b Variable) int { return strings.Compare(a.Name, b.Name) })
-	return out
-}
-
 // SaveName is the name the save and load screens show.
-func (s *Save) SaveName() string { return s.ExtraInfo }
+func (s *Document) SaveName() string { return s.ExtraInfo }
 
 // SignatureStatus checks the save's signatures against its log; ring may be nil.
-func (s *Save) SignatureStatus(ring *KeyRing) SignatureStatus {
+func (s *Document) SignatureStatus(ring *KeyRing) SignatureStatus {
 	return VerifySignatures(s.Log.Data, s.Signatures, ring)
 }
 
 // EncodeOpts are the changes Encode makes.
 type EncodeOpts struct {
 	// Edits are the new values of variables.
-	Edits []pickle.Edit
+	Edits []model.Edit
 	// SaveName, when set, is the new name of the save.
 	SaveName *string
 	// Keys, when it can sign, signs the new log. Without it, the signatures of a changed log
@@ -198,10 +161,20 @@ type EncodeOpts struct {
 	Keys *KeyRing
 }
 
-// Encode returns the bytes of the save file with the changes. Every file of the zip that
+// Encode returns the bytes of the save file with the edits made and without signatures if
+// the log changed; see EncodeWith to sign it.
+func (s *Document) Encode(edits []model.Edit) ([]byte, error) {
+	return s.EncodeWith(EncodeOpts{Edits: edits})
+}
+
+// EncodeWith returns the bytes of the save file with the changes. Every file of the zip that
 // does not change is copied as it is, in its place.
-func (s *Save) Encode(opts EncodeOpts) ([]byte, error) {
-	logData, err := s.Log.Patch(opts.Edits)
+func (s *Document) EncodeWith(opts EncodeOpts) ([]byte, error) {
+	patches, err := s.patches(opts.Edits)
+	if err != nil {
+		return nil, err
+	}
+	logData, err := s.Log.Patch(patches)
 	if err != nil {
 		return nil, err
 	}
@@ -290,59 +263,12 @@ func copyEntry(w *zip.Writer, f *zip.File) error {
 	return nil
 }
 
-// WriteFile writes data to path through a temporary file in the same folder, so a failure
-// leaves the old file as it was. With backup, the old file is first copied to path + ".bak",
-// unless that file exists already (it keeps the save as it was before the first edit).
-func WriteFile(ctx context.Context, path string, data []byte, backup bool) error {
-	if err := ctx.Err(); err != nil {
-		return errors.NewErr(tagSaveWriteFailed, err).SetMetadata("path", path)
-	}
-	if backup {
-		old, err := os.ReadFile(path)
-		switch {
-		case err == nil:
-			if _, statErr := os.Stat(path + ".bak"); os.IsNotExist(statErr) {
-				if err := os.WriteFile(path+".bak", old, 0o644); err != nil {
-					return errors.NewErr(tagSaveBackupFailed, err).SetMetadata("path", path+".bak")
-				}
-			}
-		case !os.IsNotExist(err):
-			return errors.NewErr(tagSaveBackupFailed, err).SetMetadata("path", path)
-		}
-	}
-	mode := os.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return errors.NewErr(tagSaveWriteFailed, err).SetMetadata("path", path)
-	}
-	_, err = tmp.Write(data)
-	if err == nil {
-		err = tmp.Chmod(mode)
-	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
-	if err == nil {
-		err = os.Rename(tmp.Name(), path)
-	}
-	if err != nil {
-		_ = os.Remove(tmp.Name()) // the write failed already; the temporary file is only litter
-		return errors.NewErr(tagSaveWriteFailed, err).SetMetadata("path", path)
-	}
-	return nil
-}
-
 // The tags of the errors that this file makes.
 const (
-	tagSaveBackupFailed    = "SaveBackupFailed"
 	tagSaveEncodeFailed    = "SaveEncodeFailed"
 	tagSaveEntryUnreadable = "SaveEntryUnreadable"
 	tagSaveLogMissing      = "SaveLogMissing"
 	tagSaveNotZip          = "SaveNotZip"
 	tagSaveRootsMissing    = "SaveRootsMissing"
 	tagSaveUnreadable      = "SaveUnreadable"
-	tagSaveWriteFailed     = "SaveWriteFailed"
 )

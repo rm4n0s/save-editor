@@ -1,0 +1,10 @@
+{
+	"playerName": "Ünity Hero",
+	"level": 12,
+	"health": 87.5,
+	"alive": true,
+	"nothing": null,
+	"position": {"x": 1.5, "y": 0, "z": -2},
+	"inventory": ["sword", "shield", 3],
+	"stats": {"strength": 10, "luck": 0.25, "tags": []}
+}

@@ -11,10 +11,10 @@ import (
 	"testing"
 
 	"github.com/rm4n0s/errors"
-	"github.com/rm4n0s/save-editor/internal/pickle"
+	"github.com/rm4n0s/save-editor/internal/model"
 )
 
-func openSave(t *testing.T, name string) *Save {
+func openSave(t *testing.T, name string) *Document {
 	t.Helper()
 	s, err := Open(context.Background(), filepath.Join("testdata", name))
 	if err != nil {
@@ -32,7 +32,7 @@ func loadKeys(t *testing.T, name string) *KeyRing {
 	return k
 }
 
-func variable(t *testing.T, s *Save, name string) Variable {
+func variable(t *testing.T, s *Document, name string) model.Variable {
 	t.Helper()
 	for _, v := range s.Variables() {
 		if v.Name == name {
@@ -40,7 +40,7 @@ func variable(t *testing.T, s *Save, name string) Variable {
 		}
 	}
 	t.Fatalf("no variable %q", name)
-	return Variable{}
+	return model.Variable{}
 }
 
 // entries are the names and bodies of the files of a zip, in order.
@@ -82,7 +82,7 @@ func TestOpenReadsTheParts(t *testing.T) {
 			if s.RenpyVersion != tt.version {
 				t.Errorf("version %q, want %q", s.RenpyVersion, tt.version)
 			}
-			if got := bytes.HasPrefix(s.Screenshot, []byte("\x89PNG")); got != tt.screenshot {
+			if got := bytes.HasPrefix(s.Screenshot(), []byte("\x89PNG")); got != tt.screenshot {
 				t.Errorf("screenshot %v, want %v", got, tt.screenshot)
 			}
 			if s.Log.Protocol != tt.protocol {
@@ -98,7 +98,7 @@ func TestOpenReadsTheParts(t *testing.T) {
 			if vars[0].Name != "_internal" || !vars[0].Internal || vars[1].Name != "big" || vars[1].Internal {
 				t.Errorf("the variables are not sorted with _internal marked: %+v %+v", vars[0], vars[1])
 			}
-			if v := variable(t, s, "money"); v.Key != "store.money" || v.Slot.Value.Repr() != "150" {
+			if v := variable(t, s, "money"); v.Slot.Value.Repr() != "150" || v.Slot.Site == nil {
 				t.Errorf("money = %+v", v)
 			}
 		})
@@ -142,40 +142,40 @@ func TestEncode(t *testing.T) {
 	tests := []struct {
 		name       string
 		save       string
-		opts       func(s *Save) EncodeOpts
+		opts       func(s *Document) EncodeOpts
 		money      string
 		signatures SignatureStatus
 		names      []string
 		saveName   string
 	}{
-		{"no change", "renpy8.save", func(*Save) EncodeOpts { return EncodeOpts{} }, "150", SignedTrusted,
+		{"no change", "renpy8.save", func(*Document) EncodeOpts { return EncodeOpts{} }, "150", SignedTrusted,
 			[]string{"screenshot.png", "extra_info", "json", "renpy_version", "log", "signatures"}, "Chapter 2"},
-		{"an edit drops the signatures", "renpy8.save", func(s *Save) EncodeOpts {
+		{"an edit drops the signatures", "renpy8.save", func(s *Document) EncodeOpts {
 			return EncodeOpts{Edits: moneyEdit(t, s, 5000)}
 		}, "5000", Unsigned, []string{"screenshot.png", "extra_info", "json", "renpy_version", "log"}, "Chapter 2"},
-		{"an edit signed with the ring", "renpy8.save", func(s *Save) EncodeOpts {
+		{"an edit signed with the ring", "renpy8.save", func(s *Document) EncodeOpts {
 			return EncodeOpts{Edits: moneyEdit(t, s, 5000), Keys: mine}
 		}, "5000", SignedTrusted, []string{"screenshot.png", "extra_info", "json", "renpy_version", "log", "signatures"}, "Chapter 2"},
-		{"a friend's save signed with the ring", "friend.save", func(*Save) EncodeOpts {
+		{"a friend's save signed with the ring", "friend.save", func(*Document) EncodeOpts {
 			return EncodeOpts{Keys: mine}
 		}, "150", SignedTrusted, []string{"extra_info", "json", "renpy_version", "log", "signatures"}, "Chapter 2"},
-		{"an unsigned save gets signatures", "renpy7.save", func(s *Save) EncodeOpts {
+		{"an unsigned save gets signatures", "renpy7.save", func(s *Document) EncodeOpts {
 			return EncodeOpts{Edits: moneyEdit(t, s, 1), Keys: mine}
 		}, "1", SignedTrusted, []string{"extra_info", "json", "renpy_version", "log", "signatures"}, "Chapter 2"},
-		{"a ring without a signing key keeps nothing", "renpy8.save", func(s *Save) EncodeOpts {
+		{"a ring without a signing key keeps nothing", "renpy8.save", func(s *Document) EncodeOpts {
 			ring, err := ParseKeyRing("verifying-key " + mustLine(t, "security_keys.txt", "verifying-key"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			return EncodeOpts{Edits: moneyEdit(t, s, 2), Keys: ring}
 		}, "2", Unsigned, []string{"screenshot.png", "extra_info", "json", "renpy_version", "log"}, "Chapter 2"},
-		{"a new name", "renpy8.save", func(*Save) EncodeOpts { return EncodeOpts{SaveName: &name} }, "150", SignedTrusted,
+		{"a new name", "renpy8.save", func(*Document) EncodeOpts { return EncodeOpts{SaveName: &name} }, "150", SignedTrusted,
 			[]string{"screenshot.png", "extra_info", "json", "renpy_version", "log", "signatures"}, name},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := openSave(t, tt.save)
-			out, err := s.Encode(tt.opts(s))
+			out, err := s.EncodeWith(tt.opts(s))
 			if err != nil {
 				t.Fatalf("Encode: %v", err)
 			}
@@ -196,7 +196,7 @@ func TestEncode(t *testing.T) {
 			if !equal(names, tt.names) {
 				t.Errorf("entries %v, want %v", names, tt.names)
 			}
-			if !bytes.Equal(again.Screenshot, s.Screenshot) {
+			if !bytes.Equal(again.Screenshot(), s.Screenshot()) {
 				t.Error("the screenshot changed")
 			}
 			if again.SaveName() != tt.saveName || again.Metadata["_save_name"] != tt.saveName {
@@ -209,9 +209,9 @@ func TestEncode(t *testing.T) {
 	}
 }
 
-func moneyEdit(t *testing.T, s *Save, n int64) []pickle.Edit {
+func moneyEdit(t *testing.T, s *Document, n int64) []model.Edit {
 	t.Helper()
-	return []pickle.Edit{{Site: variable(t, s, "money").Slot.Site, Value: &pickle.Value{Kind: pickle.KindInt, Int: big.NewInt(n)}}}
+	return []model.Edit{{Site: variable(t, s, "money").Slot.Site, Value: &model.Value{Kind: model.KindInt, Int: big.NewInt(n)}}}
 }
 
 // mustLine is the base64 of the first field of the line of kind in a key file of testdata.
@@ -240,43 +240,6 @@ func equal(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-func TestWriteFileKeepsTheFirstBackup(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "1-1.save")
-	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	for _, body := range []string{"first edit", "second edit"} {
-		if err := WriteFile(ctx, path, []byte(body), true); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	}
-	for _, tt := range []struct{ path, want string }{{path, "second edit"}, {path + ".bak", "original"}} {
-		got, err := os.ReadFile(tt.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != tt.want {
-			t.Errorf("%s = %q, want %q", filepath.Base(tt.path), got, tt.want)
-		}
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("mode %v, want the file's 0600", info.Mode().Perm())
-	}
-	left, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(left) != 2 {
-		t.Errorf("%d files in the folder, want the save and its backup", len(left))
-	}
 }
 
 func zipOf(t *testing.T, method uint16, files map[string]string) []byte {
@@ -332,12 +295,36 @@ func TestFailures(t *testing.T) {
 			_, err := Parse(zipOf(t, zip.Deflate, map[string]string{"log": "\x80\x02]."}))
 			return err
 		}, "Parse.SaveRootsMissing"},
-		{"an edit of a container", func() error {
+		{"an edit of a place of another save", func() error {
 			s := openSave(t, "renpy8.save")
-			_, err := s.Encode(EncodeOpts{Edits: []pickle.Edit{{Site: variable(t, s, "inventory").Slot.Site,
-				Value: &pickle.Value{Kind: pickle.KindNone}}}})
+			_, err := s.Encode(moneyEdit(t, openSave(t, "renpy8.save"), 1))
 			return err
-		}, "Save.Encode->Document.Patch.PickleSiteNotEditable"},
+		}, "Document.Encode->Document.EncodeWith->Document.patches.EditSiteUnknown"},
+		{"an edit without a site", func() error {
+			s := openSave(t, "renpy8.save")
+			_, err := s.Encode([]model.Edit{{Value: &model.Value{Kind: model.KindInt, Int: big.NewInt(1)}}})
+			return err
+		}, "Document.patches.EditSiteUnknown"},
+		{"an edit of another kind", func() error {
+			s := openSave(t, "renpy8.save")
+			_, err := s.Encode([]model.Edit{{Site: variable(t, s, "money").Slot.Site, Value: &model.Value{Kind: model.KindString, Str: "x"}}})
+			return err
+		}, "Document.patches.EditKindMismatch"},
+		{"an edit without a value", func() error {
+			s := openSave(t, "renpy8.save")
+			_, err := s.Encode([]model.Edit{{Site: variable(t, s, "money").Slot.Site}})
+			return err
+		}, "Document.patches.EditKindMismatch"},
+		{"a number without digits", func() error {
+			s := openSave(t, "renpy8.save")
+			_, err := s.Encode([]model.Edit{{Site: variable(t, s, "money").Slot.Site, Value: &model.Value{Kind: model.KindInt}}})
+			return err
+		}, "Document.patches.EditKindMismatch"},
+		{"the same place edited twice", func() error {
+			s := openSave(t, "renpy8.save")
+			_, err := s.Encode(append(moneyEdit(t, s, 1), moneyEdit(t, s, 2)...))
+			return err
+		}, "Document.Patch.PickleSiteNotEditable"},
 		{"a missing key file", func() error {
 			_, err := LoadKeyRing(ctx, filepath.Join(dir, "missing.txt"))
 			return err
@@ -354,12 +341,6 @@ func TestFailures(t *testing.T) {
 			_, err := ParseKeyRing("signing-key " + "//////////////////////////////////////////8=" + "\n")
 			return err
 		}, "ParseKeyRing->parsePrivateKey.KeyInvalid"},
-		{"a folder that does not exist", func() error {
-			return WriteFile(ctx, filepath.Join(dir, "no", "1-1.save"), []byte("x"), false)
-		}, "WriteFile.SaveWriteFailed"},
-		{"a backup of a folder", func() error {
-			return WriteFile(ctx, dir, []byte("x"), true)
-		}, "WriteFile.SaveBackupFailed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
