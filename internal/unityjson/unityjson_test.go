@@ -459,15 +459,20 @@ func checkLayers(t *testing.T, name string, old, out []byte) {
 // by openssl itself, as an independent check of the cipher and the key derivation.
 func opensslDecrypt(t *testing.T, file []byte, password string) []byte {
 	t.Helper()
-	path, err := exec.LookPath("openssl")
-	if err != nil {
-		t.Skip("openssl is not installed")
+	// OPENSSL names a program of OpenSSL 3 when the one on the path is not (macOS's is LibreSSL, which has no `kdf` command).
+	path := os.Getenv("OPENSSL")
+	if path == "" {
+		var err error
+		if path, err = exec.LookPath("openssl"); err != nil {
+			t.Skip("openssl is not installed")
+		}
 	}
 	iv := hex.EncodeToString(file[:blockSize])
 	key, err := exec.Command(path, "kdf", "-keylen", "16", "-kdfopt", "digest:SHA1", "-kdfopt", "pass:"+password,
 		"-kdfopt", "hexsalt:"+iv, "-kdfopt", "iter:100", "-binary", "PBKDF2").Output()
-	if err != nil {
-		t.Skipf("openssl kdf: %v", err)
+	if err != nil || len(key) != 16 {
+		// LibreSSL answers an unknown command with its usage text and a good exit code, so the length tells it.
+		t.Skipf("openssl kdf gave %d bytes, not a key (%v): this openssl has no kdf command; set OPENSSL to OpenSSL 3", len(key), err)
 	}
 	cmd := exec.Command(path, "enc", "-d", "-aes-128-cbc", "-K", hex.EncodeToString(key), "-iv", iv)
 	cmd.Stdin = bytes.NewReader(file[blockSize:])

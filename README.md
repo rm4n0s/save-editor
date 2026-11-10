@@ -58,7 +58,11 @@ go run github.com/rm4n0s/save-editor@latest
 
 or from a clone, `go run . [file]`. Build a binary with `go build` (`CGO_ENABLED=0` works).
 
-Shortcuts: Ctrl+O opens, Ctrl+S saves, Ctrl+Shift+S saves as.
+Shortcuts: Ctrl+O opens, Ctrl+S saves, Ctrl+Shift+S saves as (Cmd on a Mac).
+
+It runs on Linux, Windows and macOS (Glutter 1.16: AppKit and Metal on a Mac, from macOS 12, Apple silicon or Intel; no C compiler
+or other install is needed). On a Mac it follows the system's light and dark appearance and uses the system font, and the file
+dialogs are the system's: ![Save Editor on macOS](docs/screenshots/macos-glutter-1.16.png)
 
 ## Where the saves are
 

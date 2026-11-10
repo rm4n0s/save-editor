@@ -3,7 +3,7 @@
 Guidance for Claude Code when working in this repository (Go, hosted on GitHub at `github.com/rm4n0s/save-editor`).
 
 ## Project
-A desktop editor for the save files of games, in the spirit of saveeditonline.com but offline. It opens a save, lists the variables of the game as a tree, lets the user change numbers, text and switches, and writes the save back so the game loads it. It opens Ren'Py, RPG Maker 2000/2003, XP, VX, VX Ace, MV and MZ, Unreal Engine (GVAS), Unity PlayerPrefs, Unity .NET BinaryFormatter, Unity JSON and Easy Save 3 saves (SPEC.md says what each is). A Ren'Py save is signed with the user's Ren'Py key so the game loads it without a prompt. The UI is built with [Glutter](https://github.com/rm4n0s/glutter), a cgo-free Go toolkit with Flutter's framework API (widgets, Material 3) on its own engine. Linux desktop comes first; Windows and macOS follow from Glutter.
+A desktop editor for the save files of games, in the spirit of saveeditonline.com but offline. It opens a save, lists the variables of the game as a tree, lets the user change numbers, text and switches, and writes the save back so the game loads it. It opens Ren'Py, RPG Maker 2000/2003, XP, VX, VX Ace, MV and MZ, Unreal Engine (GVAS), Unity PlayerPrefs, Unity .NET BinaryFormatter, Unity JSON and Easy Save 3 saves (SPEC.md says what each is). A Ren'Py save is signed with the user's Ren'Py key so the game loads it without a prompt. The UI is built with [Glutter](https://github.com/rm4n0s/glutter), a cgo-free Go toolkit with Flutter's framework API (widgets, Material 3) on its own engine. The app runs on Linux, Windows and macOS (Glutter 1.16 and later).
 
 ## Working with agents
 - Opus 5.5 at high effort is the manager: it plans the work, splits it into tasks, writes the contracts between them (shared types, interfaces, file ownership), reviews what comes back and runs the Definition of done. It does not do the tasks itself
@@ -25,6 +25,7 @@ A desktop editor for the save files of games, in the spirit of saveeditonline.co
 - Format: `gofmt -w .`
 - After changing dependencies: `go mod tidy`
 - A proof screenshot of the real app, headless: run the binary on a private `Xvfb` with `GLUTTER_BACKEND=x11 GLUTTER_SCREENSHOT=out.png GLUTTER_SCREENSHOT_AFTER=2s` and `HOME` set to a scratch folder (headless weston has no `wl_seat`, which Glutter's Wayland backend needs). Under `setsid -w timeout -k 2 30`, so that the shell waits for it
+- A proof screenshot on a Mac: `HOME=<scratch folder> GLUTTER_MACOS_ACCESSORY=1 GLUTTER_DISPLAYLINK=cv GLUTTER_SCREENSHOT=out.png GLUTTER_SCREENSHOT_AFTER=3s timeout -k 2 40 ./save-editor <fixture>` (the app stays in the background and never takes the focus; the proof of macOS is `docs/screenshots/macos-glutter-1.16.png`)
 
 ### Fixture generators
 Every fixture is small, made for the tests, and comes with the script that made it. The scripts use only the Python standard library (and, for Easy Save, the `openssl` program); run each from the module root:
@@ -44,7 +45,7 @@ Where an independent reader exists, the tests run it and skip when it is missing
 - `python3` on the path: the pickle tests (`internal/pickle/testdata/load.py`), the PlayerPrefs tests (`internal/unityprefs/testdata/load.py`, with `plistlib`) and the LCF tests (`gen.py dump`)
 - `RUBYMARSHAL_PYTHON=<a python that has the package rubymarshal>`: `internal/rgss` and `internal/rubymarshal` read the fixtures and the edited files with it. A venv with `pip install rubymarshal` is enough; nothing of the repository needs it otherwise
 - `RPGMV_CORESCRIPT=<checkout of github.com/rpgtkoolmv/corescript>`, `RPGMZ_CORESCRIPT=<folder with rmmz_core.js, rmmz_managers.js and libs/pako.min.js>` and, optionally, `RPGMV_LZSTRING=<path list of lz-string.js files of version 1.4 or later>`, with `node` on the path: `go test -count=1 -v ./internal/rpgmv -run 'Engine|JavaScript|TestEdits'` runs the engines' own StorageManager, JsonEx and lz-string and pako on the fixtures and on the edited files (`testdata/engine.js`, `lzcheck.js`). The scripts are third-party code: do not fetch or run them without the user's say-so
-- `openssl` on the path: `internal/unityjson` decrypts what the editor writes with OpenSSL's `kdf` and `enc`
+- `openssl` on the path: `internal/unityjson` decrypts what the editor writes with OpenSSL's `kdf` and `enc`. macOS's `openssl` is LibreSSL, which has no `kdf` command: the test skips there, and `OPENSSL=<OpenSSL 3>` (Homebrew's `openssl@3`) runs it
 
 ## Definition of done
 Before reporting a task as finished, run `gofmt`, `go vet ./...`, `golangci-lint run` and `go test -race ./...`, and fix anything they report. Say so explicitly if any step was skipped or failed. Also:

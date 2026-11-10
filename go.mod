@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/rm4n0s/errors v0.2.0
-	github.com/rm4n0s/glutter v1.9.9
+	github.com/rm4n0s/glutter v1.16.0
 	golang.org/x/text v0.43.0
 )
 
