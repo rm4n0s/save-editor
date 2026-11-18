@@ -13,7 +13,7 @@ starts the next step only when told to.
   spec, with credit, is fine.
 - Never read the user's real game or save folders; a proof run sets `HOME` to a scratch folder.
 - Finish every step with the Definition of done of CLAUDE.md on the whole repository (`gofmt -l .`,
-  `go vet ./...`, `golangci-lint run`, `go test -race ./...`, `CGO_ENABLED=0 go build ./...`,
+  `go vet ./...`, `golangci-lint run`, `go test -race -tags debug_mode ./...`, `CGO_ENABLED=0 go build ./...`,
   `CGO_ENABLED=0 go test ./...`). A step is not done while any of them fails.
 - **Screenshot**: when the step changes what the app can open or show, run the real app headless on the step's
   fixture as CLAUDE.md describes (private Xvfb under `timeout -k`, own process group, `HOME` in a scratch

@@ -16,10 +16,10 @@ A desktop editor for the save files of games, in the spirit of saveeditonline.co
 ## Commands
 - Build: `go build ./...`. The app is cgo-free; `CGO_ENABLED=0 go build ./...` must always work
 - Run: `go run . [file]`
-- Test all: `go test -race ./...` (the race detector needs cgo, so this one needs a C compiler)
-- Test the cgo-free path: `CGO_ENABLED=0 go test ./...`
-- Test one package: `go test ./internal/pickle -run TestName -v`
-- Update golden images: `go test . -run Golden -update-goldens`, then look at every changed PNG. `-run TestGolden` is the Ren'Py one, `-run TestGoldenOfAnotherEngine` the RPG Maker MV one
+- Test all: `go test -race -tags debug_mode ./...` (the race detector needs cgo, so this one needs a C compiler). Since Glutter 1.17 a build without tags is a release build (`foundation.ReleaseMode`) and `-tags debug_mode` makes a debug build; the app's widget tests (TestGolden, TestShowsTheSave, TestUndoAndDiscard, ...) skip in a release build, so every test run of the root package needs the tag
+- Test the cgo-free (and release) path: `CGO_ENABLED=0 go test ./...` (the root package's widget tests skip here; they run with `-tags debug_mode`)
+- Test one package: `go test ./internal/pickle -run TestName -v` (the root package: `go test -tags debug_mode . -run TestName -v`)
+- Update golden images: `go test -tags debug_mode . -run Golden -update-goldens`, then look at every changed PNG. `-run TestGolden` is the Ren'Py one, `-run TestGoldenOfAnotherEngine` the RPG Maker MV one
 - Vet: `go vet ./...`
 - Lint: `golangci-lint run`
 - Format: `gofmt -w .`
@@ -48,8 +48,8 @@ Where an independent reader exists, the tests run it and skip when it is missing
 - `openssl` on the path: `internal/unityjson` decrypts what the editor writes with OpenSSL's `kdf` and `enc`. macOS's `openssl` is LibreSSL, which has no `kdf` command: the test skips there, and `OPENSSL=<OpenSSL 3>` (Homebrew's `openssl@3`) runs it
 
 ## Definition of done
-Before reporting a task as finished, run `gofmt`, `go vet ./...`, `golangci-lint run` and `go test -race ./...`, and fix anything they report. Say so explicitly if any step was skipped or failed. Also:
-- `CGO_ENABLED=0 go build ./...` and `CGO_ENABLED=0 go test ./...` pass
+Before reporting a task as finished, run `gofmt`, `go vet ./...`, `golangci-lint run` and `go test -race -tags debug_mode ./...`, and fix anything they report. Say so explicitly if any step was skipped or failed. Also:
+- `CGO_ENABLED=0 go build ./...` and `CGO_ENABLED=0 go test ./...` pass (the second is the release build, where the widget tests skip), and so does `CGO_ENABLED=0 go test -tags debug_mode ./...` where the platform allows it
 - Every new exported identifier has a doc comment
 - Every changed golden image has been looked at, not just regenerated
 - A change to how saves are read or written is checked against the independent reader of its format where there is one (see Reference checks): the pickle tests run `load.py`, the RGSS and Marshal tests the Python package `rubymarshal`, the PlayerPrefs tests `plistlib`, the Easy Save tests `openssl`; a change to signing is checked with Ren'Py's `ecsign.py`
